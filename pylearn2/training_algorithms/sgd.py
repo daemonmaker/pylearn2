@@ -35,7 +35,7 @@ from pylearn2.utils import sharedX
 from pylearn2.utils.data_specs import DataSpecsMapping
 from pylearn2.utils.timing import log_timing
 from pylearn2.utils.rng import make_np_rng
-
+import ipdb
 
 log = logging.getLogger(__name__)
 
@@ -261,10 +261,10 @@ class SGD(TrainingAlgorithm):
            monitoring_datasets_are_uneven and \
            not has_uniform_batch_size(self.monitor_iteration_mode):
 
-            raise ValueError("Dataset size is not a multiple of batch size."
-                             "You should set monitor_iteration_mode to "
-                             "even_sequential, even_shuffled_sequential or "
-                             "even_batchwise_shuffled_sequential")
+        #    raise ValueError("Dataset size is not a multiple of batch size."
+        #                     "You should set monitor_iteration_mode to "
+        #                     "even_sequential, even_shuffled_sequential or "
+        #                     "even_batchwise_shuffled_sequential")
 
         data_specs = self.cost.get_data_specs(self.model)
         mapping = DataSpecsMapping(data_specs)
@@ -445,8 +445,10 @@ class SGD(TrainingAlgorithm):
 
         on_load_batch = self.on_load_batch
         for batch in iterator:
+            ipdb.set_trace()
             for callback in on_load_batch:
                 callback(*batch)
+            ipdb.set_trace()
             self.sgd_update(*batch)
             # iterator might return a smaller batch if dataset size
             # isn't divisible by batch_size
