@@ -201,7 +201,7 @@ class SGD(TrainingAlgorithm):
         self.theano_function_mode = theano_function_mode
         self.monitoring_costs = monitoring_costs
 
-    def setup(self, model, dataset):
+    def setup(self, model, dataset, update_func=None):
         """
         Compiles the theano functions needed for the train method.
         """
@@ -360,14 +360,18 @@ class SGD(TrainingAlgorithm):
                     raise ValueError("debug value of %s contains nans" %
                             update.name)
 
+        self.sgd_update = update_func
+        if not self.sgd_update:
+            with log_timing(log, 'Compiling sgd_update'):
+                self.sgd_update = function(theano_args,
+                                           updates=updates,
+                                           name='sgd_update',
+                                           on_unused_input='ignore',
+                                           mode=self.theano_function_mode)
 
-        with log_timing(log, 'Compiling sgd_update'):
-            self.sgd_update = function(theano_args,
-                                       updates=updates,
-                                       name='sgd_update',
-                                       on_unused_input='ignore',
-                                       mode=self.theano_function_mode)
         self.params = params
+
+        return self.sgd_update
 
     def train(self, dataset):
         """
@@ -414,10 +418,9 @@ class SGD(TrainingAlgorithm):
 
         on_load_batch = self.on_load_batch
         for batch in iterator:
-            ipdb.set_trace()
             for callback in on_load_batch:
                 callback(*batch)
-            ipdb.set_trace()
+            #ipdb.set_trace()
             self.sgd_update(*batch)
             # iterator might return a smaller batch if dataset size
             # isn't divisible by batch_size

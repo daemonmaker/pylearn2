@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 
 
 class Train(object):
+    update_func = None
+
     """
     A class representing the main loop of the training script.  Trains the
     specified model using the specified algorithm on the specified dataset.
@@ -152,7 +154,11 @@ class Train(object):
                 if not continue_learning:
                     break
         else:
-            self.algorithm.setup(model=self.model, dataset=self.dataset)
+            self.update_func = self.algorithm.setup(
+                model=self.model,
+                dataset=self.dataset,
+                update_func=self.update_func
+            )
             self.setup_extensions()
             # Model.censor_updates is used by the training algorithm to
             # enforce constraints after each step of learning. Here we
