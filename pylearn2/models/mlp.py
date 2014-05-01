@@ -2767,6 +2767,66 @@ class Softplus(Linear):
         raise NotImplementedError()
 
 
+class RadialBasisFunction(Linear):
+    """
+    A layer that performs an affine transformation of its (vectorial)
+    input followed by a (Gaussian) radial basis function.
+
+    training_data: dataset
+        A reference to a dataset from which centers can be selected.
+    standard_deviation: float
+        The standard deviation of the RBF. Will be held constant for all nodes
+        in the layer.
+
+    For the other parameters see the Linear class.
+    """
+
+    def __init__(self, training_data,
+                 standard_deviation=1, **kwargs):
+        super(RadialBasisFunction, self).__init__(**kwargs)
+        # Validate and store the parameters
+        assert standard_deviation > 0
+        self.standard_deviation = standard_deviation
+
+        assert(training_data is not None)
+        self.training_data = training_data
+
+    @wraps(Layer.fprop)
+    def fprop(self, state_below):
+        # Boiler plate
+        self.input_space.validate(state_below)
+
+        if self.requires_reformat:
+            state_below = self.input_space.format_as(state_below,
+                                                     self.desired_space)
+
+        # Calculate RBF
+        z = (state_below.dimshuffle(0, 'x', 1) - self.centers[None, :, :]) ** 2
+        z = z.sum(axis=2)
+        if self.layer_name is not None:
+            z.name = self.layer_name + '_z'
+
+        p = T.exp(-z/(2*self.standard_deviation**2))
+        if self.layer_name is not None:
+            p.name = self.layer_name + '_p_'
+
+        return p
+
+    def set_input_space(self, space):
+        super(RadialBasisFunction, self).set_input_space(space)
+
+        # Select centers
+        itr = self.training_data.iterator(
+            mode='random_uniform',
+            batch_size=self.dim,
+            num_batches=1,  # We only want one set of points
+        )
+        self.centers = itr.next()
+
+        # Remove training data so pickling will work
+        del self.training_data
+
+
 class SpaceConverter(Layer):
     """
     A Layer with no parameters that converts the input from
