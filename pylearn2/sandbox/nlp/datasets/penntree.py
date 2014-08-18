@@ -5,6 +5,7 @@ See: http://www.cis.upenn.edu/~treebank/
 """
 
 __authors__ = "Bart van Merrienboer"
+__modified__ = "Bing Xu"
 __copyright__ = "Copyright 2010-2014, Universite de Montreal"
 __license__ = "3-clause BSD"
 
@@ -32,7 +33,7 @@ class PennTreebank(DenseDesignMatrix):
         Whether to shuffle the samples or go through the dataset
         linearly
     """
-    def __init__(self, which_set, context_len, shuffle=True):
+    def __init__(self, which_set, context_len, batch_size, shuffle=True):
         """
         Loads the data and turns it into n-grams
         """
@@ -59,10 +60,11 @@ class PennTreebank(DenseDesignMatrix):
                                        context_len + 1),
                                 strides=(self._raw_data.itemsize,
                                          self._raw_data.itemsize))
-
+        sz = self._data.shape[0]
+        sz = sz - sz % batch_size
         super(PennTreebank, self).__init__(
-            X=self._data[:, :-1],
-            y=self._data[:, -1:],
+            X=self._data[:sz, :-1],
+            y=self._data[:sz, -1:],
             X_labels=10000, y_labels=10000
         )
 
