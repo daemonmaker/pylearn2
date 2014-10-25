@@ -17,10 +17,11 @@ from pylearn2.space import CompositeSpace
 import theano.tensor as T
 from theano import config
 from theano.compat.python2x import OrderedDict
+from theano import printing
 
 
 class RandomProjectionGater(Model):
-    def __init__(self, n_vis, n_classes, batch_size, layers):
+    def __init__(self, n_vis, n_classes, batch_size, layers, debug=False):
         super(RandomProjectionGater, self).__init__()
 
         assert(n_vis > 0)
@@ -54,27 +55,51 @@ class RandomProjectionGater(Model):
 
         self.layers = layers
 
+        self.debug = debug
+
     def fprop(self, x):
+        idxs = [self.one_block_idxs]
+
+        # Reshape input for block sparse operator
         activation = x.dimshuffle(0, 'x', 1)
-        if self.layers[0].in_idxs is None:
-            self.layers[0].in_idxs = self.one_block_idxs
-        if self.layers[0].out_idxs is None:
-            self.layers[0].set_out_idxs(activation)
-        activation = self.layers[0].output(activation)
-        for idx in range(1, len(self.layers)-1):
-            if self.layers[idx].out_idxs is None:
-                self.layers[idx].set_out_idxs(activation)
 
-            if self.layers[idx].in_idxs is None:
-                self.layers[idx].in_idxs = self.layers[idx-1].out_idxs
+        # Calculate activation of the first layer
+        # This should activate all blocks in the second layer
+        out_idxs = self.layers[0].calc_out_idxs(activation, True)
+        if self.debug:
+            out_idxs = printing.Print('idxs in:')(out_idxs)
+        idxs.append(out_idxs)
+        activation = self.layers[0].output(activation, idxs[-2], idxs[-1])
 
-            activation = self.layers[idx].output(activation)
-        self.layers[-1].in_idxs = self.layers[-2].out_idxs
-        self.layers[-1].out_idxs = self.one_block_idxs
-        activation = self.layers[-1].output(activation)
+        # Calculate the activation of the intermediary layers
+        for idx in range(1, len(self.layers)-2):
+            out_idxs = self.layers[idx].calc_out_idxs(activation)
+            if self.debug:
+                out_idxs = printing.Print('idxs %d:' % idx)(out_idxs)
+            idxs.append(out_idxs)
+            activation = self.layers[idx].output(
+                activation,
+                idxs[-2],
+                idxs[-1]
+            )
+
+        # Calculate activation for second to last layer
+        # This should activate all blocks in the second to last layer
+        if len(self.layers) > 2:
+            out_idxs = self.layers[-2].calc_out_idxs(activation, True)
+            if self.debug:
+                out_idxs = printing.Print('idxs out:')(out_idxs)
+            idxs.append(out_idxs)
+            activation = self.layers[-2].output(activation, idxs[-2], idxs[-1])
+
+        # Calculate the activation of the final layer
+        # This is always activate the one and only block in the last layer
+        activation = self.layers[-1].output(activation, idxs[-1], idxs[0])
 
         shp = activation.shape
-        prediction = T.nnet.softmax(activation.reshape((shp[0], shp[2])))
+        #prediction = T.nnet.softmax(activation.reshape((shp[0], shp[2])))
+        #prediction = T.nnet.softmax(activation.reshape(x.shape[0], shp[2]))
+        prediction = T.nnet.softmax(activation.reshape((x.shape[0], self.layers[-1].n_units_per_out)))
         return prediction
 
     def _init_parameters(self):
@@ -95,7 +120,7 @@ class RandomProjectionGater(Model):
 
     def get_monitoring_data_specs(self):
         space = CompositeSpace([self.get_input_space(),
-                            self.get_target_space()])
+                                self.get_target_space()])
         source = (self.get_input_source(), self.get_target_source())
         return (space, source)
 
@@ -105,6 +130,11 @@ class RandomProjectionGater(Model):
 
         X, y = data
         y_hat = self.fprop(X)
-        error = T.neq(y.argmax(axis=1), y_hat.argmax(axis=1)).mean()
+        error = T.cast(
+            T.neq(y.argmax(axis=1), y_hat.argmax(axis=1)).mean(),
+            config.floatX
+        )
 
-        return OrderedDict([('error', error)])
+        monitors = OrderedDict()
+        monitors['misclass'] = error
+        return monitors
