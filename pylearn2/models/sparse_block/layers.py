@@ -4,6 +4,7 @@ import theano
 from theano import function
 from theano import tensor as T
 from theano import config
+from theano import shared
 from theano.tensor.shared_randomstreams import RandomStreams
 
 from theano.sandbox.cuda.blocksparse import sparse_block_dot_SS
@@ -14,7 +15,7 @@ else:
     mode_with_gpu = theano.compile.mode.get_default_mode().including('gpu')
 
 
-from pylearn2.utils import sharedX
+from pylearn2.utils import sharedX, block_gradient
 
 
 class HiddenLayer(object):
@@ -262,13 +263,24 @@ class HiddenRandomBlockLayer(HiddenBlockLayer):
             rng=rng,
         )
 
-    def calc_out_idxs(self, input):
+    def calc_out_idxs(self, input, all=False):
+        if all:
+            return shared(
+                np.repeat(
+                    np.arange(self.n_out).reshape(1, self.n_out),
+                    self.batch_size,
+                    axis=0
+                ),
+                name='all_idxs'
+            )
+
         iWin = self.k
 
         if self.n_in == 1:
             iWin = 1
 
-        inner_dim = iWin*self.n_units_per_in
+        #inner_dim = iWin*self.n_units_per_in
+        inner_dim = input.shape[1]*input.shape[2]
 
         trng = RandomStreams(seed=0)
         rand_proj_mat = trng.normal(
@@ -281,10 +293,11 @@ class HiddenRandomBlockLayer(HiddenBlockLayer):
         #    temp = self.n_units_per_in
         rnd_proj = T.dot(
             input.reshape((input.shape[0], input.shape[1]*input.shape[2])),
-            #x.reshape((self.batch_size, temp)),
             rand_proj_mat
         )
-        self.out_idxs = T.cast(T.argsort(rnd_proj)[:, -self.k:], 'int64')
+        return block_gradient(
+            T.cast(T.sort(T.argsort(rnd_proj)[:, -self.k:]), 'int64')
+        )
 
     def __str__(self):
         return ("n_in: %d (%d units) , n_out: %d (%d units)"
@@ -324,13 +337,13 @@ class HiddenRandomBlockLayer(HiddenBlockLayer):
 
         return W_val, b_val
 
-    def output(self, x):
+    def output(self, x, in_idxs, out_idxs):
         sparse = sparse_block_dot_SS(
             self.W,
             x,
-            self.in_idxs,
+            in_idxs,
             self.b,
-            self.out_idxs
+            out_idxs
         )
 
         return (sparse if self.activation is None
