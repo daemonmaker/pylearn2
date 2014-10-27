@@ -29,10 +29,11 @@ __authors__ = "Ian Goodfellow"
 __copyright__ = "Copyright 2010-2012, Universite de Montreal"
 __credits__ = ["Ian Goodfellow"]
 __license__ = "3-clause BSD"
-__maintainer__ = "Ian Goodfellow"
-__email__ = "goodfeli@iro"
+__maintainer__ = "LISA Lab"
+__email__ = "pylearn-dev@googlegroups"
 
-import functools, warnings
+import functools
+import warnings
 import numpy as np
 import theano
 import theano.sparse
@@ -110,7 +111,11 @@ def is_numeric_batch(batch):
     (e.g. () for empty CompositeSpaces, None for NullSpaces).
     """
     def is_numeric(batch):
-        return isinstance(batch, np.ndarray) or scipy.sparse.issparse(batch)
+        # Uses the 'CudaNdarray' string to avoid importing
+        # theano.sandbox.cuda when it is not available
+        return (isinstance(batch, np.ndarray) or
+                scipy.sparse.issparse(batch) or
+                str(type(batch)) == "<type 'CudaNdarray'>")
 
     return _is_batch_all(batch, is_numeric)
 
@@ -272,8 +277,8 @@ class Space(object):
         """
         Returns the batch axis of the output space.
 
-        Return
-        ------
+        Returns
+        -------
         batch_axis : int
             the axis of the batch in the output space.
         """
@@ -459,7 +464,7 @@ class Space(object):
         my_dimension = self.get_total_dimension()
         other_dimension = space.get_total_dimension()
         if my_dimension != other_dimension:
-            raise ValueError(str(self)+" with total dimension " +
+            raise ValueError(str(self) + " with total dimension " +
                              str(my_dimension) +
                              " can't format a batch into " +
                              str(space) + "because its total dimension is " +
@@ -584,7 +589,7 @@ class Space(object):
             Necessary because it can be impossible to tell from the
             batch whether it should be treated as a numeric of symbolic
             batch, for example when the batch is the empty tuple (),
-			or NullSpace batch None.
+            or NullSpace batch None.
 
         batch : a theano variable, numpy ndarray, scipy.sparse matrix \
                 or a nested tuple thereof
@@ -763,15 +768,31 @@ class SimplyTypedSpace(Space):
             raise TypeError("This space only supports simple dtypes, but "
                             "received a composite batch.")
 
-        def is_complex(dtype):
-            return str(dtype).startswith('complex')
+        # Checks for information-destroying casts.
+        #
+        # To be maximally strict, we'd guard against all loss of precision by
+        # checking if np.can_cast(batch.dtype, self.dtype).
+        #
+        # Because this prohibits float64->float32, it breaks too much of the
+        # codebase (float64 is default float, float32 is default CUDA float for
+        # many graphics cards).
+        #
+        # Therefore, we only prohibit the following:
+        # * non-integral type to integral type
+        # * complex to non-complex
 
-        if self.dtype is not None and \
-           is_complex(batch.dtype) and \
-           not is_complex(self.dtype):
-            raise TypeError("This space has a non-complex dtype (%s), and "
-                            "thus cannot support complex batches of type %s."
-                            % (self.dtype, batch.dtype))
+        def is_complex(dtype):
+            return np.issubdtype(dtype, np.complex)
+
+        def is_integral(dtype):
+            return np.issubdtype(dtype, np.integer)
+
+        if self.dtype is not None:
+            if (is_complex(batch.dtype) and not is_complex(self.dtype)) or \
+               (not is_integral(batch.dtype) and is_integral(self.dtype)):
+                raise TypeError("Cannot safely cast batch dtype %s to "
+                                "space's dtype %s. " %
+                                (batch.dtype, self.dtype))
 
     @property
     def dtype(self):
@@ -801,7 +822,7 @@ class SimplyTypedSpace(Space):
 
         # When unpickling a Space that was pickled before Spaces had dtypes,
         # we need to set the _dtype to the default value.
-        if not '_dtype' in state_dict:
+        if '_dtype' not in state_dict:
             self._dtype = theano.config.floatX
 
 
@@ -834,7 +855,7 @@ class IndexSpace(SimplyTypedSpace):
         Passes on to superclass constructor
     """
     def __init__(self, max_labels, dim, dtype='int64', **kwargs):
-        if not 'int' in dtype:
+        if 'int' not in dtype:
             raise ValueError("The dtype of IndexSpace must be an integer type")
 
         super(IndexSpace, self).__init__(dtype, **kwargs)
@@ -873,6 +894,15 @@ class IndexSpace(SimplyTypedSpace):
     @functools.wraps(Space.get_total_dimension)
     def get_total_dimension(self):
         return self.dim
+
+    @functools.wraps(Space.get_origin)
+    def get_origin(self):
+        return np.zeros((1, self.dim,))
+
+    @functools.wraps(Space.get_origin_batch)
+    def get_origin_batch(self, batch_size, dtype=None):
+        dtype = self._clean_dtype_arg(dtype)
+        return np.zeros((batch_size, self.dim), dtype=dtype)
 
     @functools.wraps(Space._check_sizes)
     def _check_sizes(self, space):
@@ -927,6 +957,15 @@ class IndexSpace(SimplyTypedSpace):
             rval = tensor.lrow(name=name)
         else:
             rval = tensor.lmatrix(name=name)
+
+        if theano.config.compute_test_value != 'off':
+            if batch_size == 1:
+                n = 1
+            else:
+                # TODO: try to extract constant scalar value from batch_size
+                n = 4
+            rval.tag.test_value = self.get_origin_batch(batch_size=n,
+                                                        dtype=dtype)
         return rval
 
     @functools.wraps(Space._batch_size_impl)
@@ -967,7 +1006,7 @@ class IndexSpace(SimplyTypedSpace):
             if not isinstance(batch.type, (theano.tensor.TensorType,
                                            CudaNdarrayType)):
                 raise TypeError("IndexSpace batch should be TensorType or "
-                                "CudaNdarrayType, got "+str(batch.type))
+                                "CudaNdarrayType, got " + str(batch.type))
             if batch.ndim != 2:
                 raise ValueError('IndexSpace batches must be 2D, got %d '
                                  'dimensions' % batch.ndim)
@@ -1072,7 +1111,7 @@ class VectorSpace(SimplyTypedSpace):
             my_dimension = self.get_total_dimension()
             other_dimension = space.get_total_dimension()
             if my_dimension != other_dimension:
-                raise ValueError(str(self)+" with total dimension " +
+                raise ValueError(str(self) + " with total dimension " +
                                  str(my_dimension) +
                                  " can't format a batch into " +
                                  str(space) +
@@ -1095,7 +1134,7 @@ class VectorSpace(SimplyTypedSpace):
             pieces = []
             for component in space.components:
                 width = component.get_total_dimension()
-                subtensor = batch[:, pos:pos+width]
+                subtensor = batch[:, pos:pos + width]
                 pos += width
                 vector_subspace = VectorSpace(dim=width,
                                               dtype=self.dtype,
@@ -1198,7 +1237,7 @@ class VectorSpace(SimplyTypedSpace):
             elif not isinstance(batch.type, (theano.tensor.TensorType,
                                              CudaNdarrayType)):
                 raise TypeError("VectorSpace batch should be TensorType or "
-                                "CudaNdarrayType, got "+str(batch.type))
+                                "CudaNdarrayType, got " + str(batch.type))
 
             if batch.ndim != 2:
                 raise ValueError('VectorSpace batches must be 2D, got %d '
@@ -1357,7 +1396,7 @@ class IndexSequenceSpace(SimplyTypedSpace):
         Passes on to superclass constructor
     """
     def __init__(self, max_labels, dim, dtype='int64', **kwargs):
-        if not 'int' in dtype:
+        if 'int' not in dtype:
             raise ValueError("The dtype of IndexSequenceSpace must be an "
                              "integer type")
 
@@ -1517,7 +1556,6 @@ class Conv2DSpace(SimplyTypedSpace):
     kwargs : dict
         Passed on to superclass constructor
     """
-
 
     # Assume pylearn2's get_topological_view format, since this is how
     # data is currently served up. If we make better iterators change

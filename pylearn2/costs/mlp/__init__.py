@@ -8,11 +8,13 @@ from theano import tensor as T
 
 from pylearn2.costs.cost import Cost, DefaultDataSpecsMixin, NullDataSpecsMixin
 from pylearn2.utils import safe_izip
+from pylearn2.utils.exc import reraise_as
 
 
 class Default(DefaultDataSpecsMixin, Cost):
     """
     The default Cost to use with an MLP.
+
     It simply calls the MLP's cost_from_X method.
     """
 
@@ -83,8 +85,8 @@ class WeightDecay(NullDataSpecsMixin, Cost):
                 if coef==0.:
                     return 0.
                 else:
-                    raise NotImplementedError(str(type(layer)) +
-                            " does not implement get_weight_decay.")
+                    reraise_as(NotImplementedError(str(type(layer)) +
+                               " does not implement get_weight_decay."))
 
         layer_costs = [ wrapped_layer_cost(layer, coeff)
             for layer, coeff in safe_izip(model.layers, self.coeffs) ]

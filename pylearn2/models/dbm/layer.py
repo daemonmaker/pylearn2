@@ -1,18 +1,17 @@
 """
-.. todo::
-
-    WRITEME
+Common DBM Layer classes
 """
 __authors__ = ["Ian Goodfellow", "Vincent Dumoulin"]
 __copyright__ = "Copyright 2012-2013, Universite de Montreal"
 __credits__ = ["Ian Goodfellow"]
 __license__ = "3-clause BSD"
-__maintainer__ = "Ian Goodfellow"
+__maintainer__ = "LISA Lab"
 
+import functools
 import logging
+import numpy as np
 import time
 import warnings
-import numpy as np
 
 from theano import tensor as T, function, config
 import theano
@@ -30,12 +29,8 @@ from pylearn2.models.dbm import init_sigmoid_bias_from_marginals
 from pylearn2.space import VectorSpace, CompositeSpace, Conv2DSpace, Space
 from pylearn2.utils import is_block_gradient
 from pylearn2.utils import sharedX, safe_zip, py_integer_types, block_gradient
+from pylearn2.utils.exc import reraise_as
 from pylearn2.utils.rng import make_theano_rng
-"""
-.. todo::
-
-    WRITEME
-"""
 from pylearn2.utils import safe_union
 
 
@@ -780,12 +775,8 @@ class BinaryVectorMaxPool(HiddenLayer):
                 raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
             self.mask = sharedX(self.mask_weights)
 
-    def censor_updates(self, updates):
-        """
-        .. todo::
-
-            WRITEME
-        """
+    @functools.wraps(Model._modify_updates)
+    def _modify_updates(self, updates):
 
         # Patch old pickle files
         if not hasattr(self, 'mask_weights'):
@@ -1446,9 +1437,39 @@ class BinaryVectorMaxPool(HiddenLayer):
 
 class Softmax(HiddenLayer):
     """
-    .. todo::
+    A layer representing a single softmax distribution of a
+    set of discrete categories.
 
-        WRITEME
+    Parameters
+    ----------
+    n_classes : int
+        The number of discrete categories.
+    layer_name : str
+        The name of the layer.
+    irange : float
+        If not None, initialze the weights in U(-irange, irange)
+    sparse_init : int
+        If not None, initialize `sparse_init` weights per column
+        to N(0, sparse_istdev^2)
+    sparse_istdev : float
+        see above
+    W_lr_scale : float
+        Scale the learning rate on the weights by this amount
+    b_lr_scale : float
+        Scale the learning rate on the biases by this amount
+    max_col_norm : float
+        If not None, constrain the columns of the weight matrix
+        to have at most this L2 norm
+    copies : int
+        Make this many copies of the random variables, all sharing
+        the same weights. This allows the undirected model to
+        behave as if it has asymmetric connections.
+    center : bool
+        If True, use Gregoire Montavon's centering trick.
+    learn_init_inpainting_state : bool
+        If True, and using inpainting-based methods (MP-DBM), learn
+        a parameter controlling the initial value of the mean field
+        state for this layer.
     """
 
     presynaptic_name = "presynaptic_Y_hat"
@@ -1474,12 +1495,8 @@ class Softmax(HiddenLayer):
             b = self.b.get_value()
             self.offset = sharedX(np.exp(b) / np.exp(b).sum())
 
-    def censor_updates(self, updates):
-        """
-        .. todo::
-
-            WRITEME
-        """
+    @functools.wraps(Model._modify_updates)
+    def _modify_updates(self, updates):
 
         if not hasattr(self, 'max_col_norm'):
             self.max_col_norm = None
@@ -1492,12 +1509,8 @@ class Softmax(HiddenLayer):
                 desired_norms = T.clip(col_norms, 0, self.max_col_norm)
                 updates[W] = updated_W * (desired_norms / (1e-7 + col_norms))
 
+    @functools.wraps(Model.get_lr_scalers)
     def get_lr_scalers(self):
-        """
-        .. todo::
-
-            WRITEME
-        """
 
         rval = OrderedDict()
 
@@ -1739,16 +1752,33 @@ class Softmax(HiddenLayer):
 
     def recons_cost(self, Y, Y_hat_unmasked, drop_mask_Y, scale):
         """
-        .. todo::
+        The cost of reconstructing `Y` as `Y_hat`. Specifically,
+        the negative log probability.
 
-            WRITEME
-        """
-        """
-            scale is because the visible layer also goes into the
-            cost. it uses the mean over units and examples, so that
+        This cost is for use with multi-prediction training.
+
+        Parameters
+        ----------
+        Y : target space batch
+            The data labels
+        Y_hat_unmasked : target space batch
+            The output of this layer's `mf_update`; the predicted
+            values of `Y`. Even though the model is only predicting
+            the dropped values, we take predictions for all the
+            values here.
+        drop_mask_Y : 1-D theano tensor
+            A batch of 0s/1s, with 1s indicating that variables
+            have been dropped, and should be included in the
+            reconstruction cost. One indicator per example in the
+            batch, since each example in this layer only has one
+            random variable in it.
+        scale : float
+            Multiply the cost by this amount.
+            We need to do this because the visible layer also goes into
+            the cost. We use the mean over units and examples, so that
             the scale of the cost doesn't change too much with batch
             size or example size.
-            we need to multiply this cost by scale to make sure that
+            We need to multiply this cost by scale to make sure that
             it is put on the same scale as the reconstruction cost
             for the visible units. ie, scale should be 1/nvis
         """
@@ -2106,15 +2136,10 @@ class GaussianVisLayer(VisibleLayer):
 
         return rval
 
-    def censor_updates(self, updates):
-        """
-        .. todo::
-
-            WRITEME
-        """
+    @functools.wraps(Model._modify_updates)
+    def _modify_updates(self, updates):
         if self.beta in updates:
             updated_beta = updates[self.beta]
-            # updated_beta = Print('updating beta',attrs=['min', 'max'])(updated_beta)
             updates[self.beta] = T.clip(updated_beta,
                     self.min_beta,1e6)
 
@@ -2800,7 +2825,7 @@ class ConvMaxPool(HiddenLayer):
             try:
                 self.output_space.validate(msg)
             except TypeError, e:
-                raise TypeError(str(type(layer_above))+".downward_message gave something that was not the right type: "+str(e))
+                reraise_as(TypeError(str(type(layer_above))+".downward_message gave something that was not the right type: "+str(e)))
         else:
             msg = None
 
@@ -3302,7 +3327,7 @@ class ConvC01B_MaxPool(HiddenLayer):
             try:
                 self.output_space.validate(msg)
             except TypeError, e:
-                raise TypeError(str(type(layer_above))+".downward_message gave something that was not the right type: "+str(e))
+                reraise_as(TypeError(str(type(layer_above))+".downward_message gave something that was not the right type: "+str(e)))
         else:
             msg = None
 

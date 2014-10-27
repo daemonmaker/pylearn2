@@ -12,13 +12,16 @@ __authors__ = "Ian Goodfellow and Mehdi Mirza"
 __copyright__ = "Copyright 2010-2012, Universite de Montreal"
 __credits__ = ["Ian Goodfellow"]
 __license__ = "3-clause BSD"
-__maintainer__ = "Ian Goodfellow"
-__email__ = "goodfeli@iro"
+__maintainer__ = "LISA Lab"
+__email__ = "pylearn-dev@googlegroups"
 import functools
 
 import logging
 import warnings
+
 import numpy as np
+
+from pylearn2.datasets import cache
 from pylearn2.utils.iteration import (
     FiniteDatasetIterator,
     resolve_iterator_class
@@ -34,7 +37,9 @@ from pylearn2.datasets.dataset import Dataset
 from pylearn2.datasets import control
 from pylearn2.space import CompositeSpace, Conv2DSpace, VectorSpace, IndexSpace
 from pylearn2.utils import safe_zip
+from pylearn2.utils.exc import reraise_as
 from pylearn2.utils.rng import make_np_rng
+from pylearn2.utils import contains_nan
 from theano import config
 
 
@@ -52,6 +57,7 @@ def ensure_tables():
 
 
 class DenseDesignMatrix(Dataset):
+
     """
     A class for representing datasets that can be stored as a dense design
     matrix (and optionally, associated targets).
@@ -108,13 +114,16 @@ class DenseDesignMatrix(Dataset):
     rng : object, optional
         A random number generator used for picking random \
         indices into the design matrix when choosing minibatches.
-    max_labels : int, optional
-        If y contains labels (usually an IndexSpace) then max_labels \
-        must be passed to indicate the total number of possible labels \
-        e.g. 10 for MNIST, or the size of your target vocabulary in a \
-        language model. Note that this is the same as the size of the \
-        output layer in the case the target labels are formatted as \
-        one-hot vectors (in a VectorSpace).
+    X_labels : int, optional
+        If X contains labels then X_labels must be passed to indicate the
+        total number of possible labels e.g. the size of a the vocabulary
+        when X contains word indices. This will make the set use
+        IndexSpace.
+    y_labels : int, optional
+        If y contains labels then y_labels must be passed to indicate the
+        total number of possible labels e.g. 10 for the MNIST dataset
+        where the targets are numbers. This will make the set use
+        IndexSpace.
 
     See Also
     --------
@@ -163,14 +172,22 @@ class DenseDesignMatrix(Dataset):
     def __init__(self, X=None, topo_view=None, y=None,
                  view_converter=None, axes=('b', 0, 1, 'c'),
                  rng=_default_seed, preprocessor=None, fit_preprocessor=False,
-                 max_labels=None):
+                 max_labels=None, X_labels=None, y_labels=None):
         self.X = X
         self.y = y
-        self.max_labels = max_labels
+        self.view_converter = view_converter
+        self.X_labels = X_labels
+        self.y_labels = y_labels
 
         if max_labels is not None:
-            assert y is not None
-            assert np.all(y < max_labels)
+            warnings.warn("The max_labels argument to DenseDesignMatrix is "
+                          "deprecated. Use the y_labels argument instead. The "
+                          "max_labels argument will be removed on or after "
+                          "6 October 2014", stacklevel=2)
+            assert y_labels is None
+            self.y_labels = max_labels
+
+        self._check_labels()
 
         if topo_view is not None:
             assert view_converter is None
@@ -179,7 +196,6 @@ class DenseDesignMatrix(Dataset):
             assert X is not None, ("DenseDesignMatrix needs to be provided "
                                    "with either topo_view, or X")
             if view_converter is not None:
-                self.view_converter = view_converter
 
                 # Get the topo_space (usually Conv2DSpace) from the
                 # view_converter
@@ -196,17 +212,27 @@ class DenseDesignMatrix(Dataset):
                 self.X_topo_space = None
 
             # Update data specs, if not done in set_topological_view
-            X_space = VectorSpace(dim=self.X.shape[1])
             X_source = 'features'
+            if X_labels is None:
+                X_space = VectorSpace(dim=X.shape[1])
+            else:
+                if X.ndim == 1:
+                    dim = 1
+                else:
+                    dim = X.shape[-1]
+                X_space = IndexSpace(dim=dim, max_labels=X_labels)
             if y is None:
                 space = X_space
                 source = X_source
             else:
-                if self.y.ndim == 1:
+                if y.ndim == 1:
                     dim = 1
                 else:
-                    dim = self.y.shape[-1]
-                y_space = VectorSpace(dim=dim)
+                    dim = y.shape[-1]
+                if y_labels is not None:
+                    y_space = IndexSpace(dim=dim, max_labels=y_labels)
+                else:
+                    y_space = VectorSpace(dim=dim)
                 y_source = 'targets'
 
                 space = CompositeSpace((X_space, y_space))
@@ -226,6 +252,19 @@ class DenseDesignMatrix(Dataset):
         if preprocessor:
             preprocessor.apply(self, can_fit=fit_preprocessor)
         self.preprocessor = preprocessor
+
+    def _check_labels(self):
+        """Sanity checks for X_labels and y_labels."""
+        if self.X_labels is not None:
+            assert self.X is not None
+            assert self.view_converter is None
+            assert self.X.ndim <= 2
+            assert np.all(self.X < self.X_labels)
+
+        if self.y_labels is not None:
+            assert self.y is not None
+            assert self.y.ndim <= 2
+            assert np.all(self.y < self.y_labels)
 
     @functools.wraps(Dataset.iterator)
     def iterator(self, mode=None, batch_size=None, num_batches=None,
@@ -326,12 +365,14 @@ class DenseDesignMatrix(Dataset):
 
     def get_data(self):
         """
+        Returns all the data, as it is internally stored.
+        The definition and format of these data are described in
+        `self.get_data_specs()`.
+
         Returns
         -------
         data : numpy matrix or 2-tuple of matrices
-            Returns all the data, as it is internally stored.
-            The definition and format of these data are described in
-            `self.get_data_specs()`.
+            The data
         """
         if self.y is None:
             return self.X
@@ -365,11 +406,13 @@ class DenseDesignMatrix(Dataset):
 
     def get_topo_batch_axis(self):
         """
+        The index of the axis of the batches
+
         Returns
         -------
         axis : int
-            The axis of a topological view of this dataset that corresponds to
-            indexing over different examples.
+            The axis of a topological view of this dataset that corresponds
+            to indexing over different examples.
         """
         axis = self.view_converter.axes.index('b')
         return axis
@@ -379,9 +422,11 @@ class DenseDesignMatrix(Dataset):
         If called, when pickled the dataset will be saved using only
         8 bits per element.
 
-        TODO: Not sure this should be implemented as something a base dataset
-        does. Perhaps as a mixin that specific datasets (i.e. CIFAR10) inherit
-        from.
+        .. todo::
+
+            Not sure this should be implemented as something a base dataset
+            does. Perhaps as a mixin that specific datasets (i.e. CIFAR10)
+            inherit from.
         """
         self.compress = True
 
@@ -419,10 +464,10 @@ class DenseDesignMatrix(Dataset):
 
             WRITEME
         """
-
         if d['design_loc'] is not None:
             if control.get_load_data():
-                d['X'] = np.load(d['design_loc'])
+                fname = cache.datasetCache.cache_file(d['design_loc'])
+                d['X'] = np.load(fname)
             else:
                 d['X'] = None
 
@@ -519,20 +564,23 @@ class DenseDesignMatrix(Dataset):
         if train_size != 0:
             size = train_size
         elif train_prop != 0:
-            size = np.round(self.num_examples * train_prop)
+            size = np.round(self.get_num_examples() * train_prop)
         else:
             raise ValueError("Initialize either split ratio and split size to "
                              "non-zero value.")
-        if size < self.num_examples-size:
-            dataset_iter = self.iterator(mode=_mode,
-                                         batch_size=(self.num_examples - size))
+        if size < self.get_num_examples() - size:
+            dataset_iter = self.iterator(
+                mode=_mode,
+                batch_size=(self.get_num_examples() - size))
             valid = dataset_iter.next()
-            train = dataset_iter.next()[:self.num_examples-valid.shape[0]]
+            train = dataset_iter.next()[:(self.get_num_examples()
+                                          - valid.shape[0])]
         else:
             dataset_iter = self.iterator(mode=_mode,
                                          batch_size=size)
             train = dataset_iter.next()
-            valid = dataset_iter.next()[:self.num_examples-train.shape[0]]
+            valid = dataset_iter.next()[:(self.get_num_examples()
+                                          - train.shape[0])]
         return (train, valid)
 
     def split_dataset_nfolds(self, nfolds=0):
@@ -541,7 +589,7 @@ class DenseDesignMatrix(Dataset):
         given by the user. Returns an array of folds.
 
         Parameters
-        -----------
+        ----------
         nfolds : int, optional
             The number of folds for the  the validation set.
 
@@ -557,15 +605,17 @@ class DenseDesignMatrix(Dataset):
     def split_dataset_holdout(self, train_size=0, train_prop=0):
         """
         This function splits the dataset according to the number of
-        train_size if defined by the user. Otherwise it will use the
-        train_prop to divide the dataset into a training and holdout
-        validation set. This function returns the training and validation
-        dataset.
+        train_size if defined by the user.
+
+        Otherwise it will use the train_prop to divide the dataset into a
+        training and holdout validation set. This function returns the
+        training and validation dataset.
 
         Parameters
-        -----------
+        ----------
         train_size : int
-            Number of examples that will be assigned to the training dataset.
+            Number of examples that will be assigned to the training
+            dataset.
         train_prop : float
             Proportion of dataset split.
         """
@@ -577,7 +627,7 @@ class DenseDesignMatrix(Dataset):
         n folds. Returns the folds.
 
         Parameters
-        -----------
+        ----------
         nfolds : int
             The number of folds for the  dataset.
         rng : WRITEME
@@ -596,7 +646,7 @@ class DenseDesignMatrix(Dataset):
         train_size defined by the user.
 
         Parameters
-        -----------
+        ----------
         train_size : int
             Number of examples that will be assigned to the training dataset.
         nfolds : int
@@ -644,7 +694,7 @@ class DenseDesignMatrix(Dataset):
 
         if 'default_rng' not in dir(self):
             self.default_rng = make_np_rng(None, [17, 2, 946],
-                    which_method="random_integers")
+                                           which_method="random_integers")
         self.rng = copy.copy(self.default_rng)
 
     def apply_preprocessor(self, preprocessor, can_fit=False):
@@ -669,12 +719,12 @@ class DenseDesignMatrix(Dataset):
         Parameters
         ----------
         mat : ndarray, 2-dimensional, optional
-            An array containing a design matrix representation of training \
-            examples. If unspecified, the entire dataset (`self.X`) is used \
-            instead. \
-            This parameter is not named X because X is generally used to \
-            refer to the design matrix for the current problem. In this \
-            case we want to make it clear that `mat` need not be the design \
+            An array containing a design matrix representation of training
+            examples. If unspecified, the entire dataset (`self.X`) is used
+            instead.
+            This parameter is not named X because X is generally used to
+            refer to the design matrix for the current problem. In this
+            case we want to make it clear that `mat` need not be the design
             matrix defining the dataset.
         """
         if self.view_converter is None:
@@ -717,8 +767,13 @@ class DenseDesignMatrix(Dataset):
 
             WRITEME properly
 
-        Return a view of mat in the topology preserving format.  Currently
+        Return a view of mat in the topology preserving format. Currently
         the same as get_topological_view.
+
+        Parameters
+        ----------
+        mat : ndarray, 2-dimensional
+            WRITEME
         """
 
         if self.view_converter is None:
@@ -732,18 +787,18 @@ class DenseDesignMatrix(Dataset):
         Sets the dataset to represent V, where V is a batch
         of topological views of examples.
 
+        .. todo::
+
+            Why is this parameter named 'V'?
+
         Parameters
         ----------
         V : ndarray
             An array containing a design matrix representation of
             training examples.
         axes : WRITEME
-
-        .. todo::
-
-            Why is this parameter named 'V'?
         """
-        assert not np.any(np.isnan(V))
+        assert not contains_nan(V)
         rows = V.shape[axes.index(0)]
         cols = V.shape[axes.index(1)]
         channels = V.shape[axes.index('c')]
@@ -754,7 +809,7 @@ class DenseDesignMatrix(Dataset):
         # will be used only when self.iterator is called without a
         # data_specs, and with "topo=True", which is deprecated.
         self.X_topo_space = self.view_converter.topo_space
-        assert not np.any(np.isnan(self.X))
+        assert not contains_nan(self.X)
 
         # Update data specs
         X_space = VectorSpace(dim=self.X.shape[1])
@@ -763,16 +818,18 @@ class DenseDesignMatrix(Dataset):
             space = X_space
             source = X_source
         else:
-            if self.y.ndim != 2:
-                assert self.max_labels
-                # In order to comply with IndexSpace, y must be a 2D array
-                self.y = self.y.reshape((self.y.shape[0], 1))
-                y_space = IndexSpace(max_labels=self.max_labels, dim=1)
-                y_source = 'targets'
+            if self.y.ndim == 1:
+                dim = 1
             else:
-                y_space = VectorSpace(dim=self.y.shape[-1])
-                y_source = 'targets'
-
+                dim = self.y.shape[-1]
+            # This is to support old pickled models
+            if getattr(self, 'y_labels', None) is not None:
+                y_space = IndexSpace(dim=dim, max_labels=self.y_labels)
+            elif getattr(self, 'max_labels', None) is not None:
+                y_space = IndexSpace(dim=dim, max_labels=self.max_labels)
+            else:
+                y_space = VectorSpace(dim=dim)
+            y_source = 'targets'
             space = CompositeSpace((X_space, y_space))
             source = (X_source, y_source)
 
@@ -788,8 +845,8 @@ class DenseDesignMatrix(Dataset):
         Parameters
         ----------
         topo : ndarray, optional
-            An array containing a topological representation of training \
-            examples. If unspecified, the entire dataset (`self.X`) is used \
+            An array containing a topological representation of training
+            examples. If unspecified, the entire dataset (`self.X`) is used
             instead.
 
         Returns
@@ -817,7 +874,7 @@ class DenseDesignMatrix(Dataset):
             WRITEME
         """
         assert len(X.shape) == 2
-        assert not np.any(np.isnan(X))
+        assert not contains_nan(X)
         self.X = X
 
     def get_targets(self):
@@ -835,7 +892,13 @@ class DenseDesignMatrix(Dataset):
 
             WRITEME
         """
-        return self.X.shape[0]
+
+        warnings.warn("num_examples() is being deprecated, and will be "
+                      "removed around November 7th, 2014. `get_num_examples` "
+                      "should be used instead.",
+                      stacklevel=2)
+
+        return self.get_num_examples()
 
     def get_batch_design(self, batch_size, include_labels=False):
         """
@@ -854,9 +917,9 @@ class DenseDesignMatrix(Dataset):
             idx = self.rng.randint(self.X.shape[0] - batch_size + 1)
         except ValueError:
             if batch_size > self.X.shape[0]:
-                raise ValueError("Requested %d examples from a dataset "
-                                 "containing only %d." %
-                                 (batch_size, self.X.shape[0]))
+                reraise_as(ValueError("Requested %d examples from a dataset "
+                                      "containing only %d." %
+                                      (batch_size, self.X.shape[0])))
             raise
         rx = self.X[idx:idx + batch_size, :]
         if include_labels:
@@ -872,6 +935,13 @@ class DenseDesignMatrix(Dataset):
         .. todo::
 
             WRITEME
+
+        Parameters
+        ----------
+        batch_size : int
+            WRITEME
+        include_labels : bool
+            WRITEME
         """
 
         if include_labels:
@@ -885,6 +955,10 @@ class DenseDesignMatrix(Dataset):
             return rval, labels
 
         return rval
+
+    @functools.wraps(Dataset.get_num_examples)
+    def get_num_examples(self):
+        return self.X.shape[0]
 
     def view_shape(self):
         """
@@ -1000,6 +1074,11 @@ class DenseDesignMatrix(Dataset):
         .. todo::
 
             WRITEME
+
+        Parameters
+        ----------
+        X : ndarray
+            The data to be adjusted
         """
         return X / np.abs(X).max()
 
@@ -1056,6 +1135,7 @@ class DenseDesignMatrix(Dataset):
 
 
 class DenseDesignMatrixPyTables(DenseDesignMatrix):
+
     """
     DenseDesignMatrix based on PyTables
 
@@ -1111,7 +1191,7 @@ class DenseDesignMatrixPyTables(DenseDesignMatrix):
             WRITEME
         """
         assert len(X.shape) == 2
-        assert not np.any(np.isnan(X))
+        assert not contains_nan(X)
         DenseDesignMatrixPyTables.fill_hdf5(file_handle=self.h5file,
                                             data_x=X,
                                             start=start)
@@ -1120,6 +1200,10 @@ class DenseDesignMatrixPyTables(DenseDesignMatrix):
         """
         Sets the dataset to represent V, where V is a batch
         of topological views of examples.
+
+        .. todo::
+
+            Why is this parameter named 'V'?
 
         Parameters
         ----------
@@ -1130,19 +1214,15 @@ class DenseDesignMatrixPyTables(DenseDesignMatrix):
         axes : WRITEME
             WRITEME
         start : WRITEME
-
-        .. todo::
-
-            Why is this parameter named 'V'?
         """
-        assert not np.any(np.isnan(V))
+        assert not contains_nan(V)
         rows = V.shape[axes.index(0)]
         cols = V.shape[axes.index(1)]
         channels = V.shape[axes.index('c')]
         self.view_converter = DefaultViewConverter([rows, cols, channels],
                                                    axes=axes)
         X = self.view_converter.topo_view_to_design_mat(V)
-        assert not np.any(np.isnan(X))
+        assert not contains_nan(X)
         DenseDesignMatrixPyTables.fill_hdf5(file_handle=self.h5file,
                                             data_x=X,
                                             start=start)
@@ -1233,7 +1313,7 @@ class DenseDesignMatrixPyTables(DenseDesignMatrix):
         y = h5file.createCArray(gcolumns,
                                 'y',
                                 atom=atom,
-                                shape=((stop - start, 10)),
+                                shape=((stop - start, data.y.shape[1])),
                                 title="Data targets",
                                 filters=self.filters)
         x[:] = data.X[start:stop]
@@ -1246,6 +1326,7 @@ class DenseDesignMatrixPyTables(DenseDesignMatrix):
 
 
 class DefaultViewConverter(object):
+
     """
     .. todo::
 
@@ -1253,9 +1334,13 @@ class DefaultViewConverter(object):
 
     Parameters
     ----------
-    shape : WRITEME
-    axes : WRITEME
+    shape : list
+      [num_rows, num_cols, channels]
+    axes : tuple
+      The axis ordering to use in topological views of the data. Must be some
+      permutation of ('b', 0, 1, 'c'). Default: ('b', 0, 1, 'c')
     """
+
     def __init__(self, shape, axes=('b', 0, 1, 'c')):
         self.shape = shape
         self.pixels_per_channel = 1
@@ -1280,35 +1365,44 @@ class DefaultViewConverter(object):
         """
         return self.shape
 
-    def design_mat_to_topo_view(self, X):
+    def design_mat_to_topo_view(self, design_matrix):
         """
-        .. todo::
+        Returns a topological view/copy of design matrix.
 
-            WRITEME
+        Parameters
+        ----------
+        design_matrix: numpy.ndarray
+          A design matrix with data in rows. Data is assumed to be laid out in
+          memory according to the axis order ('b', 'c', 0, 1)
+
+        returns: numpy.ndarray
+          A matrix with axis order given by self.axes and batch shape given by
+          self.shape (if you reordered self.shape to match self.axes, as
+          self.shape is always in 'c', 0, 1 order).
+
+          This will try to return
+          a view into design_matrix if possible; otherwise it will allocate a
+          new ndarray.
         """
-        assert len(X.shape) == 2
-        batch_size = X.shape[0]
+        if len(design_matrix.shape) != 2:
+            raise ValueError("design_matrix must have 2 dimensions, but shape "
+                             "was %s." % str(design_matrix.shape))
 
-        channel_shape = [batch_size, self.shape[0], self.shape[1], 1]
-        dimshuffle_args = [('b', 0, 1, 'c').index(axis) for axis in self.axes]
-        if self.shape[-1] * self.pixels_per_channel != X.shape[1]:
-            raise ValueError('View converter with ' + str(self.shape[-1]) +
-                             ' channels and ' + str(self.pixels_per_channel) +
-                             ' pixels per channel asked to convert design'
-                             ' matrix with ' + str(X.shape[1]) + ' columns.')
+        expected_row_size = np.prod(self.shape)
+        if design_matrix.shape[1] != expected_row_size:
+            raise ValueError("This DefaultViewConverter's self.shape = %s, "
+                             "for a total size of %d, but the design_matrix's "
+                             "row size was different (%d)." %
+                             (str(self.shape),
+                              expected_row_size,
+                              design_matrix.shape[1]))
 
-        def get_channel(channel_index):
-            start = self.pixels_per_channel * channel_index
-            stop = self.pixels_per_channel * (channel_index + 1)
-            data = X[:, start:stop]
-            return data.reshape(*channel_shape).transpose(*dimshuffle_args)
-
-        channels = [get_channel(i) for i in xrange(self.shape[-1])]
-
-        channel_idx = self.axes.index('c')
-        rval = np.concatenate(channels, axis=channel_idx)
-        assert len(rval.shape) == len(self.shape) + 1
-        return rval
+        bc01_shape = tuple([design_matrix.shape[0], ] +  # num. batches
+                           # Maps the (0, 1, 'c') of self.shape to ('c', 0, 1)
+                           [self.shape[i] for i in (2, 0, 1)])
+        topo_array_bc01 = design_matrix.reshape(bc01_shape)
+        axis_order = [('b', 'c', 0, 1).index(axis) for axis in self.axes]
+        return topo_array_bc01.transpose(*axis_order)
 
     def design_mat_to_weights_view(self, X):
         """
@@ -1324,34 +1418,38 @@ class DefaultViewConverter(object):
 
         return rval
 
-    def topo_view_to_design_mat(self, V):
+    def topo_view_to_design_mat(self, topo_array):
         """
-        .. todo::
+        Returns a design matrix view/copy of topological matrix.
 
-            WRITEME
+        Parameters
+        ----------
+        topo_array: numpy.ndarray
+          An N-D array with axis order given by self.axes. Non-batch axes'
+          dimension sizes must agree with corresponding sizes in self.shape.
+
+        returns: numpy.ndarray
+          A design matrix with data in rows. Data, is laid out in memory
+          according to the default axis order ('b', 'c', 0, 1). This will
+          try to return a view into topo_array if possible; otherwise it will
+          allocate a new ndarray.
         """
+        for shape_elem, axis in safe_zip(self.shape, (0, 1, 'c')):
+            if topo_array.shape[self.axes.index(axis)] != shape_elem:
+                raise ValueError(
+                    "topo_array's %s axis has a different size "
+                    "(%d) from the corresponding size (%d) in "
+                    "self.shape.\n"
+                    "  self.shape:       %s (uses standard axis order: 0, 1, "
+                    "'c')\n"
+                    "  self.axes:        %s\n"
+                    "  topo_array.shape: %s (should be in self.axes' order)")
 
-        V = V.transpose(self.axes.index('b'),
-                        self.axes.index(0),
-                        self.axes.index(1),
-                        self.axes.index('c'))
+        topo_array_bc01 = topo_array.transpose([self.axes.index(ax)
+                                                for ax in ('b', 'c', 0, 1)])
 
-        num_channels = self.shape[-1]
-        if np.any(np.asarray(self.shape) != np.asarray(V.shape[1:])):
-            raise ValueError('View converter for views of shape batch size '
-                             'followed by ' + str(self.shape) +
-                             ' given tensor of shape ' + str(V.shape))
-        batch_size = V.shape[0]
-
-        rval = np.zeros((batch_size, self.pixels_per_channel * num_channels),
-                        dtype=V.dtype)
-
-        for i in xrange(num_channels):
-            ppc = self.pixels_per_channel
-            rval[:, i * ppc:(i + 1) * ppc] = V[..., i].reshape(batch_size, ppc)
-        assert rval.dtype == V.dtype
-
-        return rval
+        return topo_array_bc01.reshape((topo_array_bc01.shape[0],
+                                        np.prod(topo_array_bc01.shape[1:])))
 
     def get_formatted_batch(self, batch, dspace):
         """
@@ -1417,15 +1515,24 @@ class DefaultViewConverter(object):
 
 def from_dataset(dataset, num_examples):
     """
-    .. todo::
+    Constructs a random subset of a DenseDesignMatrix
 
-        WRITEME
+    Parameters
+    ----------
+    dataset : DenseDesignMatrix
+    num_examples : int
+
+    Returns
+    -------
+    sub_dataset : DenseDesignMatrix
+        A new dataset containing `num_examples` examples randomly
+        drawn (without replacement) from `dataset`
     """
     try:
 
         V, y = dataset.get_batch_topo(num_examples, True)
 
-    except:
+    except TypeError:
 
         # This patches a case where control.get_load_data() is false so
         # dataset.X is None This logic should be removed whenever we implement
@@ -1440,7 +1547,7 @@ def from_dataset(dataset, num_examples):
                                      view_converter=dataset.view_converter)
         raise
 
-    rval = DenseDesignMatrix(topo_view=V, y=y)
+    rval = DenseDesignMatrix(topo_view=V, y=y, y_labels=dataset.y_labels)
     rval.adjust_for_viewer = dataset.adjust_for_viewer
 
     return rval

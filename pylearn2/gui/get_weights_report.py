@@ -11,6 +11,9 @@ from pylearn2.datasets import control
 import numpy as np
 
 
+from pylearn2.utils.exc import reraise_as
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,15 +31,15 @@ def get_weights_report(model_path=None,
     model_path : str
         Filepath of the model to make the report on.
     rescale : str
-        A string specifying how to rescale the filter images: \
-            'individual' (default): scale each filter so that it \
-                uses as much as possible of the dynamic range \
-                of the display under the constraint that 0 \
-                is gray and no value gets clipped \
-            'global' : scale the whole ensemble of weights \
-            'none' :   don't rescale
-    dataset: pylearn2.datasets.dataset.Dataset
-        Dataset object to do view conversion for displaying the weights. If \
+        A string specifying how to rescale the filter images:
+            - 'individual' (default) : scale each filter so that it
+                  uses as much as possible of the dynamic range
+                  of the display under the constraint that 0
+                  is gray and no value gets clipped
+            - 'global' : scale the whole ensemble of weights
+            - 'none' :   don't rescale
+    dataset : pylearn2.datasets.dataset.Dataset
+        Dataset object to do view conversion for displaying the weights. If
         not provided one will be loaded from the model's dataset_yaml_src.
 
     Returns
@@ -111,13 +114,13 @@ def get_weights_report(model_path=None,
         try:
             W = model.get_weights()
         except AttributeError, e:
-            raise AttributeError("""
+            reraise_as(AttributeError("""
 Encountered an AttributeError while trying to call get_weights on a model.
 This probably means you need to implement get_weights for this model class,
 but look at the original exception to be sure.
 If this is an older model class, it may have weights stored as weightsShared,
 etc.
-Original exception: """+str(e))
+Original exception: """+str(e)))
 
     if W is None and weights_view is None:
         raise ValueError("model doesn't support any weights interfaces")
@@ -201,14 +204,15 @@ def get_binocular_greyscale_weights_report(model_path=None,
     model_path : str
         Filepath of the model to make the report on.
     rescale : str
-        A string specifying how to rescale the filter images: \
-            'individual' (default): scale each filter so that it \
-                uses as much as possible of the dynamic range \
-                of the display under the constraint that 0 \
-                is gray and no value gets clipped \
-            'global' : scale the whole ensemble of weights \
-            'none' :   don't rescale
-    dataset: pylearn2.datasets.dataset.Dataset
+        A string specifying how to rescale the filter images:
+
+          - 'individual' (default) : scale each filter so that it
+            uses as much as possible of the dynamic range
+            of the display under the constraint that 0
+            is gray and no value gets clipped
+          - 'global' : scale the whole ensemble of weights
+          - 'none' : don't rescale
+    dataset : pylearn2.datasets.dataset.Dataset
         Dataset object to do view conversion for displaying the weights. If \
         not provided one will be loaded from the model's dataset_yaml_src.
 
@@ -273,13 +277,13 @@ def get_binocular_greyscale_weights_report(model_path=None,
         try:
             W = model.get_weights()
         except AttributeError, e:
-            raise AttributeError("""
+            reraise_as(AttributeError("""
 Encountered an AttributeError while trying to call get_weights on a model.
 This probably means you need to implement get_weights for this model class,
 but look at the original exception to be sure.
 If this is an older model class, it may have weights stored as weightsShared,
 etc.
-Original exception: """+str(e))
+Original exception: """+str(e)))
 
     if W is None and weights_view is None:
         raise ValueError("model doesn't support any weights interfaces")

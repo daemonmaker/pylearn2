@@ -1,14 +1,15 @@
-from __future__ import division
 """
 Stochastic Gradient Descent and related functionality such as
 learning rate adaptation, momentum, and Polyak averaging.
 """
+from __future__ import division
+
 __authors__ = "Ian Goodfellow"
 __copyright__ = "Copyright 2010-2012, Universite de Montreal"
 __credits__ = ["Ian Goodfellow, David Warde-Farley"]
 __license__ = "3-clause BSD"
-__maintainer__ = "Ian Goodfellow, David Warde-Farley"
-__email__ = "goodfeli@iro"
+__maintainer__ = "David Warde-Farley"
+__email__ = "pylearn-dev@googlegroups"
 
 import logging
 import warnings
@@ -31,7 +32,11 @@ from pylearn2.utils import py_integer_types, py_float_types
 from pylearn2.utils import safe_zip
 from pylearn2.utils import serial
 from pylearn2.utils import sharedX
+from pylearn2.utils import contains_nan
+from pylearn2.utils import contains_inf
+from pylearn2.utils import isfinite
 from pylearn2.utils.data_specs import DataSpecsMapping
+from pylearn2.utils.exc import reraise_as
 from pylearn2.utils.timing import log_timing
 from pylearn2.utils.rng import make_np_rng
 import ipdb
@@ -56,18 +61,18 @@ class SGD(TrainingAlgorithm):
         The learning rate to use. Train object callbacks can change the
         learning rate after each epoch. SGD update_callbacks can change
         it after each minibatch.
-    cost : pylearn2.costs.cost.Cost
+    cost : pylearn2.costs.cost.Cost, optional
         Cost object specifying the objective function to be minimized.
         Optionally, may be None. In this case, SGD will call the model's
         get_default_cost method to obtain the objective function.
-    batch_size : optional, int
+    batch_size : int, optional
         The size of the batch to be used.
         If not specified, the model will be asked for the batch size, so
         you must have specified the batch size there.
         (Some models are rigidly defined to only work with one batch size)
-    monitoring_batch_size : optional, int
+    monitoring_batch_size : int, optional
         The size of the monitoring batches.
-    monitoring_batches : optional, int
+    monitoring_batches : int, optional
         At the start of each epoch, we run "monitoring", to evaluate
         quantities such as the validation set error.
         monitoring_batches, if specified, determines the number of batches
@@ -78,29 +83,30 @@ class SGD(TrainingAlgorithm):
         TODO: make it possible to specify different monitoring_batches
         for each monitoring dataset. The Monitor itself already supports
         this.
-    monitoring_dataset : optional, a Dataset or dictionary
+    monitoring_dataset : Dataset or dictionary, optional
         If not specified, no monitoring is used.
         If specified to be a Dataset, monitor on that Dataset.
         If specified to be dictionary, the keys should be string names
         of datasets, and the values should be Datasets. All monitoring
         channels will be computed for all monitoring Datasets and will
         have the dataset name and an underscore prepended to them.
-    monitor_iteration_mode : optional, str
+    monitor_iteration_mode : str, optional
         The iteration mode used to iterate over the examples in all
         monitoring datasets. If not specified, defaults to 'sequential'.
         TODO: make it possible to specify different modes for different
         datasets.
-    termination_criterion : optional, instance of
-        pylearn2.termination_criteria.TerminationCriterion
+    termination_criterion : instance of \
+        pylearn2.termination_criteria.TerminationCriterion, optional
+
         Used to determine when the algorithm should stop running.
         If not specified, runs forever--or more realistically, until
         external factors halt the python process (Kansas 1977).
-    update_callbacks : optional, list
+    update_callbacks : list, optional
         If specified, each member of the list should be a callable that
         accepts an SGD instance as its only argument.
         All callbacks will be called with this SGD instance after each
         SGD step.
-    learning_rule : training_algorithms.learning_rule.LearningRule
+    learning_rule : training_algorithms.learning_rule.LearningRule, optional
         A learning rule computes the new parameter values given old
         parameters and first-order gradients. If learning_rule is None,
         sgd.SGD will update parameters according to the standard SGD
@@ -112,7 +118,7 @@ class SGD(TrainingAlgorithm):
 
         This argument allows more sophisticated learning rules, such
         as SGD with momentum.
-    init_momentum : **DEPRECATED** option, float
+    init_momentum : float, **DEPRECATED** option
         Use learning_rule instead.
         If None, does not use momentum otherwise, use momentum and
         initialize the momentum coefficient to init_momentum. Callbacks
@@ -121,32 +127,34 @@ class SGD(TrainingAlgorithm):
         SGD algorithm is scaled by a factor of 1/(1-momentum). See
         section 9 of Geoffrey Hinton's "A Practical Guide to Training
         Restricted Boltzmann Machines" for details.
-    set_batch_size : optional, bool
+    set_batch_size : bool, optional
         Defaults to False.
         If True, and batch_size conflicts with model.force_batch_size,
         will call model.set_batch_size(batch_size) in an attempt to
         change model.force_batch_size
-    train_iteration_mode : optional, str
+    train_iteration_mode : str, optional
         Defaults to 'shuffled_sequential'.
         The iteration mode to use for iterating through training examples.
-    batches_per_iter : optional, int
+    batches_per_iter : int, optional
         The number of batches to draw from the iterator over training
         examples.
         If iteration mode is 'sequential' or 'shuffled_sequential', this
         is unnecessary; when unspecified we will iterate over all examples.
-    theano_function_mode : optional, a valid argument to theano.function's
-        'mode' parameter.
+    theano_function_mode : a valid argument to theano.function's \
+        'mode' parameter, optional
+
         The theano mode to compile the updates function with. Note that
         pylearn2 includes some wraplinker modes that are not bundled with
         theano. See pylearn2.devtools. These extra modes let you do
         things like check for NaNs at every step, or record md5 digests
         of all computations performed by the update function to help
         isolate problems with nondeterminism.
-    monitoring_costs : optional, list
-        a list of Cost instances. The Monitor will also include all
+    monitoring_costs : OrderedDict, optional
+        A dictionary of Cost instances. Keys should be string containing
+        the name of the cost. The Monitor will also include all
         channels defined by these Costs, even though we don't train
         using them.
-    seed : optional, valid argument to np.random.RandomState
+    seed : valid argument to np.random.RandomState, optional
         The seed used for the random number generate to be passed to the
         training dataset iterator (if any)
     """
@@ -201,21 +209,61 @@ class SGD(TrainingAlgorithm):
         self.theano_function_mode = theano_function_mode
         self.monitoring_costs = monitoring_costs
 
+    def _setup_monitor(self):
+        """
+        Set up monitor to model the objective value, learning rate,
+        momentum (if applicable), and extra channels defined by
+        the cost.
+
+        This method must be called after `learning_rule.get_updates`,
+        since it may have an effect on `learning_rule.add_channels_to_monitor`
+        (that is currently the case for `learning_rule.RMSProp`).
+        """
+        if self.monitoring_dataset is not None:
+            if (self.monitoring_batch_size is None and
+                    self.monitoring_batches is None):
+                self.monitoring_batch_size = self.batch_size
+                self.monitoring_batches = self.batches_per_iter
+            self.monitor.setup(dataset=self.monitoring_dataset,
+                               cost=self.cost,
+                               batch_size=self.monitoring_batch_size,
+                               num_batches=self.monitoring_batches,
+                               extra_costs=self.monitoring_costs,
+                               mode=self.monitor_iteration_mode)
+            dataset_name = self.monitoring_dataset.keys()[0]
+            monitoring_dataset = self.monitoring_dataset[dataset_name]
+            #TODO: have Monitor support non-data-dependent channels
+            self.monitor.add_channel(name='learning_rate',
+                                     ipt=None,
+                                     val=self.learning_rate,
+                                     data_specs=(NullSpace(), ''),
+                                     dataset=monitoring_dataset)
+
+            if self.learning_rule:
+                self.learning_rule.add_channels_to_monitor(
+                        self.monitor,
+                        monitoring_dataset)
+
     def setup(self, model, dataset, update_func=None):
         """
         Compiles the theano functions needed for the train method.
+
+        Parameters
+        ----------
+        model : a Model instance
+        dataset : Dataset
         """
         if self.cost is None:
             self.cost = model.get_default_cost()
 
         inf_params = [param for param in model.get_params()
-                      if np.any(np.isinf(param.get_value()))]
+                      if contains_inf(param.get_value())]
         if len(inf_params) > 0:
             raise ValueError("These params are Inf: "+str(inf_params))
-        if any([np.any(np.isnan(param.get_value()))
+        if any([contains_nan(param.get_value())
                 for param in model.get_params()]):
             nan_params = [param for param in model.get_params()
-                          if np.any(np.isnan(param.get_value()))]
+                          if contains_nan(param.get_value())]
             raise ValueError("These params are NaN: "+str(nan_params))
         self.model = model
 
@@ -225,10 +273,33 @@ class SGD(TrainingAlgorithm):
         self.monitor._sanity_check()
 
         # test if force batch size and batch size
-        #if getattr(model, "force_batch_size", False) and \
-        #   any(dataset.get_design_matrix().shape[0] % self.batch_size != 0 for
-        #       dataset in self.monitoring_dataset.values()) and \
-        #   not has_uniform_batch_size(self.monitor_iteration_mode):
+        has_force_batch_size = getattr(model, "force_batch_size", False)
+        train_dataset_is_uneven = \
+            dataset.get_num_examples() % self.batch_size != 0
+
+        has_monitoring_datasets = \
+            self.monitoring_dataset is not None and \
+            self.monitoring_dataset.values() > 0
+
+        if has_monitoring_datasets:
+            monitoring_datasets_are_uneven = \
+                any(d.get_num_examples() % self.batch_size
+                    != 0 for d in self.monitoring_dataset.values())
+        else:
+            monitoring_datasets_are_uneven = False  # or True it doesn't matter
+
+        if has_force_batch_size and train_dataset_is_uneven and \
+           not has_uniform_batch_size(self.train_iteration_mode):
+
+            raise ValueError("Dataset size is not a multiple of batch size."
+                             "You should set train_iteration_mode (and "
+                             "maybe monitor_iteration_mode) to "
+                             "even_sequential, even_shuffled_sequential or "
+                             "even_batchwise_shuffled_sequential")
+
+        if has_force_batch_size and has_monitoring_datasets and \
+           monitoring_datasets_are_uneven and \
+           not has_uniform_batch_size(self.monitor_iteration_mode):
 
         #    raise ValueError("Dataset size is not a multiple of batch size."
         #                     "You should set monitor_iteration_mode to "
@@ -266,35 +337,7 @@ class SGD(TrainingAlgorithm):
             # Concatenate the name of all tensors in theano_args !?
             cost_value.name = 'objective'
 
-        # Set up monitor to model the objective value, learning rate,
-        # momentum (if applicable), and extra channels defined by
-        # the cost
         learning_rate = self.learning_rate
-        if self.monitoring_dataset is not None:
-            if (self.monitoring_batch_size is None and
-                    self.monitoring_batches is None):
-                self.monitoring_batch_size = self.batch_size
-                self.monitoring_batches = self.batches_per_iter
-            self.monitor.setup(dataset=self.monitoring_dataset,
-                               cost=self.cost,
-                               batch_size=self.monitoring_batch_size,
-                               num_batches=self.monitoring_batches,
-                               extra_costs=self.monitoring_costs,
-                               mode=self.monitor_iteration_mode)
-            dataset_name = self.monitoring_dataset.keys()[0]
-            monitoring_dataset = self.monitoring_dataset[dataset_name]
-            #TODO: have Monitor support non-data-dependent channels
-            self.monitor.add_channel(name='learning_rate',
-                                     ipt=None,
-                                     val=learning_rate,
-                                     data_specs=(NullSpace(), ''),
-                                     dataset=monitoring_dataset)
-
-            if self.learning_rule:
-                self.learning_rule.add_channels_to_monitor(
-                        self.monitor,
-                        monitoring_dataset)
-
         params = list(model.get_params())
         assert len(params) > 0
         for i, param in enumerate(params):
@@ -347,16 +390,16 @@ class SGD(TrainingAlgorithm):
         for param in params:
             if updates[param].name is None:
                 updates[param].name = 'sgd_update(' + param.name + ')'
-        model.censor_updates(updates)
+        model.modify_updates(updates)
         for param in params:
             update = updates[param]
             if update.name is None:
                 update.name = 'censor(sgd_update(' + param.name + '))'
             for update_val in get_debug_values(update):
-                if np.any(np.isinf(update_val)):
+                if contains_inf(update_val):
                     raise ValueError("debug value of %s contains infs" %
                             update.name)
-                if np.any(np.isnan(update_val)):
+                if contains_nan(update_val):
                     raise ValueError("debug value of %s contains nans" %
                             update.name)
 
@@ -369,6 +412,21 @@ class SGD(TrainingAlgorithm):
                                            on_unused_input='ignore',
                                            mode=self.theano_function_mode)
 
+        # Set up monitor to model the objective value, learning rate,
+        # momentum (if applicable), and extra channels defined by
+        # the cost.
+        # We have to do that after learning_rule.get_updates has been
+        # called, since it may have an effect on
+        # learning_rule.add_channels_to_monitor (that is currently the case
+        # for AdaDelta and RMSProp).
+        self._setup_monitor()
+
+        with log_timing(log, 'Compiling sgd_update'):
+            self.sgd_update = function(theano_args,
+                                       updates=updates,
+                                       name='sgd_update',
+                                       on_unused_input='ignore',
+                                       mode=self.theano_function_mode)
         self.params = params
 
         return self.sgd_update
@@ -387,7 +445,7 @@ class SGD(TrainingAlgorithm):
         # Make sure none of the parameters have bad values
         for param in self.params:
             value = param.get_value(borrow=True)
-            if np.any(np.isnan(value)) or np.any(np.isinf(value)):
+            if not isfinite(value):
                 raise Exception("NaN in " + param.name)
 
         self.first = False
@@ -435,14 +493,18 @@ class SGD(TrainingAlgorithm):
         # Make sure none of the parameters have bad values
         for param in self.params:
             value = param.get_value(borrow=True)
-            if np.any(np.isnan(value)) or np.any(np.isinf(value)):
+            if not isfinite(value):
                 raise Exception("NaN in " + param.name)
 
     def continue_learning(self, model):
         """
+        Returns True if the algorithm should continue running, or False
+        if it has reached convergence / started overfitting and should
+        stop.
+
+        Parameters
+        ----------
         model : a Model instance
-        Returns True if the algorithm should continue running, or False if it
-        has reached convergence / started overfitting and should stop.
         """
         if self.termination_criterion is None:
             return True
@@ -469,17 +531,22 @@ class MonitorBasedLRAdjuster(TrainExtension):
 
     Parameters
     ----------
-    high_trigger : see class-level docstring
-    low_trigger : see class-level docstring
-    grow_amt : see class-level docstring
-    min_lr : All updates to the learning rate are clipped to be at least
-    this value.
-    max_lr : All updates to the learning rate are clipped to be at most
-    this value.
-    dataset_name : optional, str
+    high_trigger : float, optional
+        See class-level docstring
+    low_trigger : float, optional
+        See class-level docstring
+    grow_amt : float, optional
+        See class-level docstring
+    min_lr : float, optional
+        All updates to the learning rate are clipped to be at least
+        this value.
+    max_lr : float, optional
+        All updates to the learning rate are clipped to be at most
+        this value.
+    dataset_name : str, optional
         If specified, use dataset_name + "_objective" as the channel
         to guide the learning rate adaptation.
-    channel_name : optional, str
+    channel_name : str, optional
         If specified, use channel_name as the channel to guide the
         learning rate adaptation. Conflicts with dataset_name.
         If neither dataset_name nor channel_name is specified, uses
@@ -509,6 +576,12 @@ class MonitorBasedLRAdjuster(TrainExtension):
     def on_monitor(self, model, dataset, algorithm):
         """
         Adjusts the learning rate based on the contents of model.monitor
+
+        Parameters
+        ----------
+        model : a Model instance
+        dataset : Dataset
+        algorithm : WRITEME
         """
         model = algorithm.model
         lr = algorithm.learning_rate
@@ -557,7 +630,7 @@ class MonitorBasedLRAdjuster(TrainExtension):
                     'specify a valid monitoring channel by using either ' + \
                     'dataset_name or channel_name in the ' + \
                     'MonitorBasedLRAdjuster constructor. ' + err_input
-            raise ValueError(err_message)
+            reraise_as(ValueError(err_message))
 
         if len(v) < 1:
             if monitor.dataset is None:
@@ -602,7 +675,7 @@ class MonitorBasedLRAdjuster(TrainExtension):
 class PatienceBasedTermCrit(object):
     """
     A monitor-based termination criterion using a geometrically increasing
-    ammount of patience. If the selected channel has decreased by a certain
+    amount of patience. If the selected channel has decreased by a certain
     proportion when comparing to the lowest value seen yet, the patience is
     set to a factor of the number of examples seen, which by default
     (patience_increase=2.) ensures the model has seen as many examples as the
@@ -622,8 +695,8 @@ class PatienceBasedTermCrit(object):
     patience_increase : float, optional
         The factor X in the patience = X * n_iter update.
     channel_name : string, optional
-        Name of the channel to examine. If None and the monitor \
-        has only one channel, this channel will be used; otherwise, an \
+        Name of the channel to examine. If None and the monitor
+        has only one channel, this channel will be used; otherwise, an
         error will be raised.
     """
     def __init__(self, prop_decrease, initial_patience,
@@ -643,12 +716,12 @@ class PatienceBasedTermCrit(object):
         Parameters
         ----------
         model : Model
-            The model used in the experiment and from which the monitor used \
+            The model used in the experiment and from which the monitor used
             in the termination criterion will be extracted.
 
         Returns
         -------
-        boolean
+        bool
             True or False, indicating if the optimization should stop or not.
         """
         monitor = model.monitor
@@ -696,11 +769,16 @@ class AnnealedLearningRate(object):
     def __call__(self, algorithm):
         """
         Updates the learning rate according to the annealing schedule.
+
+        Parameters
+        ----------
+        algorithm : WRITEME
         """
         if not self._initialized:
             self._base = algorithm.learning_rate.get_value()
+            self._initialized = True
         self._count += 1
-        algorithm.learning_rate.set_value(self.current_learning_rate())
+        algorithm.learning_rate.set_value(np.cast[config.floatX](self.current_learning_rate()))
 
     def current_learning_rate(self):
         """
@@ -721,9 +799,10 @@ class ExponentialDecay(object):
     decay_factor : float
         The learning rate at step t is given by
         `init_learning_rate / (decay_factor ** t)`
-    min_lr :
+    min_lr : float
         The learning rate will be clipped to be at least this value
     """
+
     def __init__(self, decay_factor, min_lr):
         if isinstance(decay_factor, str):
             decay_factor = float(decay_factor)
@@ -774,9 +853,11 @@ class LinearDecay(object):
     start : int
         The step at which to start decreasing the learning rate
     saturate : int
-        The step at which to stop decreating the learning rate decay_factor:
+        The step at which to stop decreating the learning rate
+    decay_factor : float
         `final learning rate = decay_factor * initial learning rate`
     """
+
     def __init__(self, start, saturate, decay_factor):
         if isinstance(decay_factor, str):
             decay_factor = float(decay_factor)
@@ -796,6 +877,10 @@ class LinearDecay(object):
     def __call__(self, algorithm):
         """
         Adjusts the learning rate according to the linear decay schedule
+
+        Parameters
+        ----------
+        algorithm : WRITEME
         """
         if self._count == 0:
             self._base_lr = algorithm.learning_rate.get_value()
@@ -819,6 +904,12 @@ def MomentumAdjustor(final_momentum, start, saturate):
     """
     Deprecated class used with the deprecated init_momentum argument.
     Use learning_rule.MomentumAdjustor instead.
+
+    Parameters
+    ----------
+    final_momentum : WRITEME
+    start : WRITEME
+    saturate : WRITEME
     """
     warnings.warn("sgd.MomentumAdjustor interface is deprecated and will "
     "become officially unsupported as of May 9, 2014. Please use "
@@ -834,11 +925,11 @@ class OneOverEpoch(TrainExtension):
     ----------
     start : int
         The epoch on which to start shrinking the learning rate
-    half_life : int
+    half_life : int, optional
         How many epochs after start it will take for the learning rate to lose
         half its value for the first time (to lose the next half of its value
         will take twice as long)
-    min_lr : float
+    min_lr : float, optional
         The minimum value the learning rate can take on
     """
     def __init__(self, start, half_life = None, min_lr = 1e-6):
@@ -855,7 +946,14 @@ class OneOverEpoch(TrainExtension):
     def on_monitor(self, model, dataset, algorithm):
         """
         Adjusts the learning rate according to the decay schedule.
+
+        Parameters
+        ----------
+        model : a Model instance
+        dataset : Dataset
+        algorithm : WRITEME
         """
+
         if not self._initialized:
             self._init_lr = algorithm.learning_rate.get_value()
             if self._init_lr < self.min_lr:
@@ -892,6 +990,7 @@ class LinearDecayOverEpoch(TrainExtension):
     decay_factor : float
         The final value would be initial learning rate times decay_factor
     """
+
     def __init__(self, start, saturate, decay_factor):
         self.__dict__.update(locals())
         del self.self
@@ -907,6 +1006,12 @@ class LinearDecayOverEpoch(TrainExtension):
     def on_monitor(self, model, dataset, algorithm):
         """
         Updates the learning rate based on the linear decay schedule.
+
+        Parameters
+        ----------
+        model : a Model instance
+        dataset : Dataset
+        algorithm : WRITEME
         """
         if not self._initialized:
             self._init_lr = algorithm.learning_rate.get_value()
@@ -943,6 +1048,7 @@ class _PolyakWorker(object):
     model : a Model
         The model whose parameters we want to train with Polyak averaging
     """
+
     def __init__(self, model):
         avg_updates = OrderedDict()
         t = sharedX(1.)
@@ -959,6 +1065,10 @@ class _PolyakWorker(object):
         """
         To be called after each SGD step.
         Updates the Polyak averaged-parameters for this model
+
+        Parameters
+        ----------
+        algorithm : WRITEME
         """
         self.avg()
 
@@ -967,10 +1077,6 @@ class PolyakAveraging(TrainExtension):
     See "A Tutorial on Stochastic Approximation Algorithms
         for Training Restricted Boltzmann Machines and
         Deep Belief Nets" by Kevin Swersky et al
-
-    Notes: this is usually used with a fixed, rather than
-        annealed learning rate.
-        It may be used in conjunction with momentum.
 
     This functionality is still a work in progress. Currently,
     your model needs to implement "add_polyak_channels" to
@@ -992,7 +1098,7 @@ class PolyakAveraging(TrainExtension):
     parameters, not the parameters used for computing
     the gradients during training.
 
-    TOOD: make use of the new on_save callback instead
+    TODO: make use of the new on_save callback instead
         of duplicating Train's save_freq flag
 
     Parameters
@@ -1000,13 +1106,18 @@ class PolyakAveraging(TrainExtension):
     start : int
         The epoch after which to start averaging (0 = start averaging
         immediately)
-    save_path : str
+    save_path : str, optional
         WRITEME
-    save_freq : int
+    save_freq : int, optional
         WRITEME
+
+    Notes
+    -----
+    This is usually used with a fixed, rather than annealed learning
+    rate. It may be used in conjunction with momentum.
     """
 
-    def __init__(self, start, save_path = None, save_freq = 1):
+    def __init__(self, start, save_path=None, save_freq=1):
         self.__dict__.update(locals())
         del self.self
         self._count = 0
@@ -1017,6 +1128,12 @@ class PolyakAveraging(TrainExtension):
         """
         Make sure Polyak-averaged model gets monitored.
         Save the model if necessary.
+
+        Parameters
+        ----------
+        model : a Model instance
+        dataset : Dataset
+        algorithm : WRITEME
         """
         if self._count == self.start:
             self._worker = _PolyakWorker(model)

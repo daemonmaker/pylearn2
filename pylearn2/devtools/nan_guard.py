@@ -5,14 +5,15 @@ __authors__ = "Ian Goodfellow"
 __copyright__ = "Copyright 2010-2012, Universite de Montreal"
 __credits__ = ["Ian Goodfellow"]
 __license__ = "3-clause BSD"
-__maintainer__ = "Ian Goodfellow"
-__email__ = "goodfeli@iro"
+__maintainer__ = "LISA Lab"
+__email__ = "pylearn-dev@googlegroups"
 
 import logging
 from theano.compile import Mode
 import theano
 import numpy as np
 from pylearn2.models.dbm import flatten
+from pylearn2.utils import contains_nan, contains_inf
 
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,13 @@ class NanGuardMode(Mode):
     nan_is_error : bool
         If True, raise an error anytime a NaN is encountered
     inf_is_error: bool
-        If True, raise an error anytime an Inf is encountered
+        If True, raise an error anytime an Inf is encountered.  Note that some
+        pylearn2 modules currently use np.inf as a default value (e.g.
+        mlp.max_pool) and these will cause an error if inf_is_error is True.
+    big_is_error: bool
+        If True, raise an error when a value greater than 1e10 is encountered.
     """
-    def __init__(self, nan_is_error, inf_is_error):
+    def __init__(self, nan_is_error, inf_is_error, big_is_error=True):
         def do_check_on(var, nd, f, is_input):
             """
             Checks `var` for NaNs / Infs. If detected, raises an exception
@@ -51,16 +56,17 @@ class NanGuardMode(Mode):
             """
             error = False
             if nan_is_error:
-                if np.any(np.isnan(var)):
+                if contains_nan(var):
                     logger.error('NaN detected')
                     error = True
             if inf_is_error:
-                if np.any(np.isinf(var)):
+                if contains_inf(var):
                     logger.error('Inf detected')
                     error = True
-            if np.abs(var).max() > 1e10:
-                logger.error('Big value detected')
-                error = True
+            if big_is_error:
+                if np.abs(var).max() > 1e10:
+                    logger.error('Big value detected')
+                    error = True
             if error:
                 if is_input:
                     logger.error('In an input')
@@ -99,4 +105,4 @@ class NanGuardMode(Mode):
                 do_check_on(x, node, fn, False)
 
         wrap_linker = theano.gof.WrapLinkerMany([theano.gof.OpWiseCLinker()], [nan_check])
-        super(NanGuardMode, self).__init__(wrap_linker, optimizer='fast_run')
+        super(NanGuardMode, self).__init__(wrap_linker, optimizer=theano.config.optimizer)

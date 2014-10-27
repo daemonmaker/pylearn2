@@ -67,11 +67,6 @@ Iteration
 .. automodule:: pylearn2.utils.iteration
     :members:
 
-Key aware
-=========
-.. automodule:: pylearn2.utils.key_aware
-    :members:
-
 Logger
 ======
 .. automodule:: pylearn2.utils.logger
@@ -102,13 +97,15 @@ Python26
 .. automodule:: pylearn2.utils.python26
     :members:
 
+RNG
+===
+.. automodule:: pylearn2.utils.rng
+    :members:
+
 Serial
 ======
 .. automodule:: pylearn2.utils.serial
     :members:
-
-Setup
-=====
 
 Shell
 =====
@@ -133,6 +130,11 @@ Theano Graph
 Timing
 ======
 .. automodule:: pylearn2.utils.timing
+    :members:
+
+Track Version
+=============
+.. automodule:: pylearn2.utils.track_version
     :members:
 
 UTLC

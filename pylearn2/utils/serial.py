@@ -12,11 +12,12 @@ import time
 import warnings
 import sys
 from pylearn2.utils.string_utils import preprocess
-from pylearn2.utils.mem import TypicalMemoryError
+from pylearn2.utils.mem import improve_memory_error_message
 from cPickle import BadPickleGet
 io = None
 hdf_reader = None
 import struct
+from pylearn2.utils.exc import reraise_as
 from pylearn2.utils.string_utils import match
 import shutil
 
@@ -36,40 +37,46 @@ def raise_cannot_open(path):
             if i == 1:
                 if so_far == '':
                     continue
-                raise IOError('Cannot open '+path+' ('+so_far+' does not exist)')
+                reraise_as(IOError('Cannot open '+path+' ('+so_far+' does not exist)'))
             parent = '/'.join(pieces[0:i-1])
             bad = pieces[i-1]
 
             if not os.path.isdir(parent):
-                raise IOError("Cannot open "+path+" because "+parent+" is not a directory.")
+                reraise_as(IOError("Cannot open "+path+" because "+parent+" is not a directory."))
 
             candidates = os.listdir(parent)
 
             if len(candidates) == 0:
-                raise IOError("Cannot open "+path+" because "+parent+" is empty.")
+                reraise_as(IOError("Cannot open "+path+" because "+parent+" is empty."))
 
             if len(candidates) > 100:
                 # Don't attempt to guess the right name if the directory is huge
-                raise IOError("Cannot open "+path+" but can open "+parent+".")
+                reraise_as(IOError("Cannot open "+path+" but can open "+parent+"."))
 
             if os.path.islink(path):
-                raise IOError(path + " appears to be a symlink to a non-existent file")
-            raise IOError("Cannot open "+path+" but can open "+parent+". Did you mean "+match(bad,candidates)+" instead of "+bad+"?")
+                reraise_as(IOError(path + " appears to be a symlink to a non-existent file"))
+            reraise_as(IOError("Cannot open "+path+" but can open "+parent+". Did you mean "+match(bad,candidates)+" instead of "+bad+"?"))
         # end if
     # end for
     assert False
 
-def load(filepath, recurse_depth=0, retry = True):
+def load(filepath, recurse_depth=0, retry=True):
     """
+    Loads object(s) from file specified by 'filepath'.
+
+    .. todo::
+
+        Refactor to hide recurse_depth from end users
+
     Parameters
     ----------
     filepath : str
         A path to a file to load. Should be a pickle, Matlab, or NumPy
         file; or a .txt or .amat file that numpy.loadtxt can load.
-    recurse_depth : int
+    recurse_depth : int, optional
         End users should not use this argument. It is used by the function
         itself to implement the `retry` option recursively.
-    retry : bool
+    retry : bool, optional
         If True, will make a handful of attempts to load the file before
         giving up. This can be useful if you are for example calling
         show_weights.py on a file that is actively being written to by a
@@ -82,10 +89,6 @@ def load(filepath, recurse_depth=0, retry = True):
     -------
     loaded_object : object
         The object that was stored in the file.
-
-    ..todo
-
-        Refactor to hide recurse_depth from end users
     """
     try:
         import joblib
@@ -102,9 +105,8 @@ def load(filepath, recurse_depth=0, retry = True):
         try:
             return np.loadtxt(filepath)
         except Exception:
-            logger.exception("{0} cannot be loaded by serial.load (trying to"
-                             " use np.loadtxt)".format(filepath))
-            raise
+            reraise_as(Exception("{0} cannot be loaded by serial.load (trying "
+                                 "to use np.loadtxt)".format(filepath)))
 
     if filepath.endswith('.mat'):
         global io
@@ -119,7 +121,7 @@ def load(filepath, recurse_depth=0, retry = True):
                 if hdf_reader is None:
                     import h5py
                     hdf_reader = h5py
-                return hdf_reader.File(filepath)
+                return hdf_reader.File(filepath, 'r')
             else:
                 raise
         #this code should never be reached
@@ -152,7 +154,7 @@ def load(filepath, recurse_depth=0, retry = True):
                 if os.path.exists(filepath) and not os.path.isdir(filepath):
                     raise
                 raise_cannot_open(filepath)
-    except MemoryError, e:
+    except MemoryError as e:
         # We want to explicitly catch this exception because for MemoryError
         # __str__ returns the empty string, so some of our default printouts
         # below don't make a lot of sense.
@@ -161,55 +163,32 @@ def load(filepath, recurse_depth=0, retry = True):
         # that makes it clear this exception is caused by their machine not
         # meeting requirements.
         if os.path.splitext(filepath)[1] == ".pkl":
-            raise TypicalMemoryError("You do not have enough memory to open "
-                                     "%s \n + Try using numpy.{save,load} (file "
-                                     "with extension '.npy') to save your file. "
-                                     "It uses less memory"
-                                     " when reading and writing files than "
-                                     "pickled files." % filepath)
+            improve_memory_error_message(e, 
+                "You do not have enough memory to open %s \n"
+                " + Try using numpy.{save,load} (file with extension '.npy') "
+                "to save your file. It uses less memory when reading and "
+                "writing files than pickled files." % filepath)
         else:
-            raise TypicalMemoryError("You do not have enough memory to open %s"
-                                     % filepath)
+            improve_memory_error_message(e, 
+                "You do not have enough memory to open %s" % filepath)
 
-    except BadPickleGet, e:
-        logger.exception('Failed to open {0} due to BadPickleGet '
-                         'with exception string {1}'.format(filepath, e))
+    except BadPickleGet:
+        if not retry:
+            reraise_as(BadPickleGet('Failed to open {0}'.format(filepath)))
+        obj =  exponential_backoff()
+    except EOFError:
+        if not retry:
+            reraise_as(EOFError("Failed to open {0}".format(filepath)))
+        obj =  exponential_backoff()
+    except ValueError:
+        logger.exception
 
         if not retry:
-            raise
+            reraise_as(ValueError('Failed to open {0}'.format(filepath)))
         obj =  exponential_backoff()
-    except EOFError, e:
-
-        logger.exception('Failed to open {0} due to EOFError '
-                         'with exception string {1}'.format(filepath, e))
-
-        if not retry:
-            raise
-        obj =  exponential_backoff()
-    except ValueError, e:
-        logger.exception('Failed to open {0} due to ValueError '
-                         'with string {1}'.format(filepath, e))
-
-        if not retry:
-            raise
-        obj =  exponential_backoff()
-    except Exception, e:
+    except Exception:
         #assert False
-        exc_str = str(e)
-        if len(exc_str) > 0:
-            import pdb
-            tb = pdb.traceback.format_exc()
-            raise Exception("Couldn't open '" + str(filepath) +
-                            "' due to: " + str(type(e)) + ', ' + str(e) +
-                            ". Orig traceback:\n" + tb)
-        else:
-            logger.exception("Couldn't open '{0}' and exception has no string."
-                             "Opening it again outside the try/catch "
-                             "so you can see whatever error it prints "
-                             "on its own.".format(filepath))
-            f = open(filepath, 'rb')
-            obj = cPickle.load(f)
-            f.close()
+        reraise_as(Exception("Couldn't open {0}".format(filepath)))
 
     #if the object has no yaml_src, we give it one that just says it
     #came from this file. could cause trouble if you save obj again
@@ -217,7 +196,7 @@ def load(filepath, recurse_depth=0, retry = True):
     if not hasattr(obj,'yaml_src'):
         try:
             obj.yaml_src = '!pkl: "'+os.path.abspath(filepath)+'"'
-        except:
+        except Exception:
             pass
 
     return obj
@@ -229,24 +208,25 @@ def save(filepath, obj, on_overwrite = 'ignore'):
     Parameters
     ----------
     filepath : str
-        A filename. If the suffix is `.joblib` and joblib can be \
-        imported, `joblib.dump` is used in place of the regular \
-        pickling mechanisms; this results in much faster saves by \
-        saving arrays as separate .npy files on disk. If the file \
-        suffix is `.npy` than `numpy.save` is attempted on `obj`. \
+        A filename. If the suffix is `.joblib` and joblib can be
+        imported, `joblib.dump` is used in place of the regular
+        pickling mechanisms; this results in much faster saves by
+        saving arrays as separate .npy files on disk. If the file
+        suffix is `.npy` than `numpy.save` is attempted on `obj`.
         Otherwise, (c)pickle is used.
 
     obj : object
         A Python object to be serialized.
 
-    on_overwrite: str
+    on_overwrite : str, optional
         A string specifying what to do if the file already exists.
         Possible values include:
 
         - "ignore" : Just overwrite the existing file.
-        - "backup" : Make a backup copy of the file (<filepath>.bak). Save the
-            new copy. Then delete the backup copy. This allows recovery of the
-            old version of the file if saving the new one fails.
+        - "backup" : Make a backup copy of the file (<filepath>.bak).
+          Save the new copy. Then delete the backup copy. This allows
+          recovery of the old version of the file if saving the new one
+          fails.
     """
     filepath = preprocess(filepath)
 
@@ -294,6 +274,7 @@ def save(filepath, obj, on_overwrite = 'ignore'):
 def get_pickle_protocol():
     """
     Allow configuration of the pickle protocol on a per-machine basis.
+
     This way, if you use multiple platforms with different versions of
     pickle, you can configure each of them to use the highest protocol
     supported by all of the machines that you want to be able to
@@ -377,12 +358,12 @@ def _save(filepath, obj):
 
                 import pdb
                 tb = pdb.traceback.format_exc()
-                raise IOError(str(obj) +
+                reraise_as(IOError(str(obj) +
                               ' could not be written to '+
                               str(filepath) +
                               ' by cPickle due to ' + str(e) +
                               ' nor by pickle due to ' + str(e2) +
-                              '. \nTraceback '+ tb)
+                              '. \nTraceback '+ tb))
         logger.warning('{0} was written by pickle instead of cPickle, due to '
                        '{1} (perhaps your object'
                        ' is really big?)'.format(filepath, e))
@@ -415,7 +396,9 @@ def from_string(s):
 
 def mkdir(filepath):
     """
-    Make a directory. Should succeed even if it needs to make more than one
+    Make a directory.
+
+    Should succeed even if it needs to make more than one
     directory and nest subdirectories to do so. Raises an error if the
     directory can't be made. Does not raise an error if the directory
     already exists.
@@ -426,7 +409,7 @@ def mkdir(filepath):
     """
     try:
         os.makedirs(filepath)
-    except:
+    except OSError:
         if not os.path.isdir(filepath):
             raise
 
@@ -466,7 +449,7 @@ def read_bin_lush_matrix(filepath):
     try:
         magic = read_int(f)
     except ValueError:
-        raise ValueError("Couldn't read magic number")
+        reraise_as(ValueError("Couldn't read magic number"))
     ndim = read_int(f)
 
     if ndim == 0:
@@ -481,7 +464,7 @@ def read_bin_lush_matrix(filepath):
     try:
         dtype = lush_magic[magic]
     except KeyError:
-        raise ValueError('Unrecognized lush magic number '+str(magic))
+        reraise_as(ValueError('Unrecognized lush magic number '+str(magic)))
 
     rval = np.fromfile(file = f, dtype = dtype, count = total_elems)
 
@@ -504,8 +487,9 @@ def load_train_file(config_file_path, environ=None):
 
     Parameters
     ----------
-    config_file_path : Path to a config file containing a YAML string
-    describing a pylearn2.train.Train object
+    config_file_path : str
+        Path to a config file containing a YAML string describing a
+        pylearn2.train.Train object
     environ : dict, optional
         A dictionary used for ${FOO} substitutions in addition to
         environment variables when parsing the YAML file. If a key appears
