@@ -167,6 +167,17 @@ class Train(object):
                 if not continue_learning:
                     break
         else:
+            self.update_func = self.algorithm.setup(
+                model=self.model,
+                dataset=self.dataset,
+                update_func=self.update_func
+            )
+            self.setup_extensions()
+            # Model.censor_updates is used by the training algorithm to
+            # enforce constraints after each step of learning. Here we
+            # make sure the constraints are enforced from the start.
+            self.model.enforce_constraints()
+
             if not hasattr(self.model, 'monitor'):
                 # TODO: is this really necessary? I just put this error here
                 # to prevent an AttributeError later, but I think we could
