@@ -301,10 +301,10 @@ class SGD(TrainingAlgorithm):
            monitoring_datasets_are_uneven and \
            not has_uniform_batch_size(self.monitor_iteration_mode):
 
-        #    raise ValueError("Dataset size is not a multiple of batch size."
-        #                     "You should set monitor_iteration_mode to "
-        #                     "even_sequential, even_shuffled_sequential or "
-        #                     "even_batchwise_shuffled_sequential")
+            raise ValueError("Dataset size is not a multiple of batch size."
+                             "You should set monitor_iteration_mode to "
+                             "even_sequential, even_shuffled_sequential or "
+                             "even_batchwise_shuffled_sequential")
 
         data_specs = self.cost.get_data_specs(self.model)
         mapping = DataSpecsMapping(data_specs)
