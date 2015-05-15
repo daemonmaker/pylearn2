@@ -62,6 +62,17 @@ class MeanSquaredReconstructionError(GSNFriendlyCost):
         return ((a - b) ** 2).sum(axis=1).mean()
 
 
+class CrossEntropy(GSNFriendlyCost):
+    supervised = False
+
+    @staticmethod
+    @wraps(GSNFriendlyCost.cost)
+    def cost(targets, outputs):
+        #from theano.printing import Print as p
+        #loss = -(targets*tensor.log(p('outputs: ')(outputs)) + (1 - targets)*tensor.log(1 - outputs))
+        loss = -(targets*tensor.log(outputs) + (1 - targets)*tensor.log(1 - outputs))
+        return loss.sum(axis=1).mean()
+
 class MeanBinaryCrossEntropy(GSNFriendlyCost):
     """
     .. todo::

@@ -101,6 +101,22 @@ class AbstractAutoencoder(Model, Block):
         """
         return self.encode(inputs)
 
+    def L1_penalty(self, model):
+        """
+        Method for calculating the L1 penalty for this autoencoder layer.
+
+        Parameters
+        ----------
+        model : The model for which the penalty should be calculated.
+        """
+        assert(self.l1_penalty_coeff is not None)
+        return tensor.abs_(self.l1_penalty_coeff * self.weights).sum()
+
+    def L1_penalty_data_specs(self):
+        """
+        Method for retrieving the data specs for this model.
+        """
+        return (self.get_input_space(), self.get_input_source())
 
 class Autoencoder(AbstractAutoencoder):
     """
@@ -146,7 +162,8 @@ class Autoencoder(AbstractAutoencoder):
     """
 
     def __init__(self, nvis, nhid, act_enc, act_dec,
-                 tied_weights=False, irange=1e-3, istdev=None, rng=9001):
+                 tied_weights=False, irange=1e-3, istdev=None, rng=9001,
+                 l1_penalty_coeff=0.1):
         """
         WRITEME
         """
@@ -171,6 +188,7 @@ class Autoencoder(AbstractAutoencoder):
         else:
             self.visbias = None
             self.weights = None
+        self.l1_penalty_coeff = l1_penalty_coeff
 
         seed = int(self.rng.randint(2 ** 30))
 
@@ -238,7 +256,6 @@ class Autoencoder(AbstractAutoencoder):
         else:
             assert istdev is not None
             W = rng.randn(nvis, self.nhid) * istdev
-
         self.weights = sharedX(W, name='W', borrow=True)
 
     def _initialize_hidbias(self):
@@ -455,7 +472,8 @@ class DenoisingAutoencoder(Autoencoder):
     for details.
     """
     def __init__(self, corruptor, nvis, nhid, act_enc, act_dec,
-                 tied_weights=False, irange=1e-3, istdev=None, rng=9001):
+                 tied_weights=False, irange=1e-3, istdev=None, rng=9001,
+                 l1_penalty_coeff=0.1):
         super(DenoisingAutoencoder, self).__init__(
             nvis=nvis,
             nhid=nhid,
